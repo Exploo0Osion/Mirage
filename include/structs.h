@@ -65,46 +65,36 @@ typedef struct _UNWIND_INFO {
   SPOOFER CONFIGURATION
 --------------------------------------------------------------------*/
 typedef struct _SPOOFER {
-    PVOID KernelBaseAddress;              // +0x00
-    PVOID KernelBaseAddressEnd;           // +0x08
+    PVOID FirstFrameFunctionPointer;      // +0x00
+    PVOID SecondFrameFunctionPointer;     // +0x08
+    PVOID JmpRbxGadget;                   // +0x10
+    PVOID AddRspXGadget;                  // +0x18
 
-    PVOID RtlUserThreadStartAddress;      // +0x10
-    PVOID BaseThreadInitThunkAddress;     // +0x18
+    DWORD64 FirstFrameSize;               // +0x20
+    DWORD64 FirstFrameRandomOffset;       // +0x28
+    DWORD64 SecondFrameSize;              // +0x30
+    DWORD64 SecondFrameRandomOffset;      // +0x38
+    DWORD64 JmpRbxGadgetFrameSize;        // +0x40
+    DWORD64 AddRspXGadgetFrameSize;       // +0x48
 
-    PVOID FirstFrameFunctionPointer;      // +0x20
-    PVOID SecondFrameFunctionPointer;     // +0x28
-    PVOID JmpRbxGadget;                   // +0x30
-    PVOID AddRspXGadget;                  // +0x38
+    DWORD64 StackOffsetWhereRbpIsPushed;  // +0x50
+    PVOID JmpRbxGadgetRef;                // +0x58
+    PVOID SpoofFunctionPointer;           // +0x60
+    PVOID ReturnAddress;                  // +0x68
 
-    DWORD64 FirstFrameSize;               // +0x40
-    DWORD64 FirstFrameRandomOffset;       // +0x48
-    DWORD64 SecondFrameSize;              // +0x50
-    DWORD64 SecondFrameRandomOffset;      // +0x58
-    DWORD64 JmpRbxGadgetFrameSize;        // +0x60
-    DWORD64 AddRspXGadgetFrameSize;       // +0x68
-
-    DWORD64 RtlUserThreadStartFrameSize;  // +0x70
-    DWORD64 BaseThreadInitThunkFrameSize; // +0x78
-
-    DWORD64 StackOffsetWhereRbpIsPushed;  // +0x80
-	PVOID RbpFrameOffset;                // +0x88
-    PVOID JmpRbxGadgetRef;                // +0x90
-    PVOID SpoofFunctionPointer;           // +0x98
-    PVOID ReturnAddress;                  // +0xA0
-
-    DWORD64 Nargs;                        // +0xA8
-    PVOID Arg01;                          // +0xB0
-    PVOID Arg02;                          // +0xB8
-    PVOID Arg03;                          // +0xC0
-    PVOID Arg04;                          // +0xC8
-    PVOID Arg05;                          // +0xD0
-    PVOID Arg06;                          // +0xD8
-    PVOID Arg07;                          // +0xE0
-    PVOID Arg08;                          // +0xE8
-    PVOID Arg09;                          // +0xF0
-    PVOID Arg10;                          // +0xF8
-    PVOID Arg11;                          // +0x100
-    PVOID Arg12;                          // +0x108
+    DWORD64 Nargs;                        // +0x70
+    PVOID Arg01;                          // +0x78
+    PVOID Arg02;                          // +0x80
+    PVOID Arg03;                          // +0x88
+    PVOID Arg04;                          // +0x90
+    PVOID Arg05;                          // +0x98
+    PVOID Arg06;                          // +0xA0
+    PVOID Arg07;                          // +0xA8
+    PVOID Arg08;                          // +0xB0
+    PVOID Arg09;                          // +0xB8
+    PVOID Arg10;                          // +0xC0
+    PVOID Arg11;                          // +0xC8
+    PVOID Arg12;                          // +0xD0
 } SPOOFER, * PSPOOFER;
 
 /*--------------------------------------------------------------------
@@ -128,6 +118,9 @@ typedef struct _VX_TABLE {
     VX_TABLE_ENTRY NtCreateSection;
     VX_TABLE_ENTRY NtMapViewOfSection;
     VX_TABLE_ENTRY NtClose;
+	VX_TABLE_ENTRY NtOpenSection;
+	VX_TABLE_ENTRY NtUnmapViewOfSection;
+	VX_TABLE_ENTRY NtQueryVirtualMemory;
 } VX_TABLE, * PVX_TABLE;
 
 typedef struct _LSA_UNICODE_STRING {
@@ -544,3 +537,34 @@ typedef struct _IO_STATUS_BLOCK {
     }
 #endif
 
+
+typedef enum _MEMORY_INFORMATION_CLASS {
+    MemoryBasicInformation,
+    MemoryWorkingSetList,
+    MemorySectionName,
+    MemoryBasicVlmInformation,
+    MemoryWorkingSetExInformation 
+} MEMORY_INFORMATION_CLASS;
+typedef struct _MEMORY_WORKING_SET_EX_BLOCK {
+    union {
+        struct {
+            ULONG_PTR Valid : 1;
+            ULONG_PTR ShareCount : 3;
+            ULONG_PTR Win32Protection : 11;
+            ULONG_PTR Shared : 1;  
+            ULONG_PTR Node : 6;
+            ULONG_PTR Locked : 1;
+            ULONG_PTR LargePage : 1;
+            ULONG_PTR Priority : 3;
+            ULONG_PTR Reserved : 3;
+            ULONG_PTR SharedOriginal : 1;
+            ULONG_PTR Protection : 5;
+        };
+        ULONG_PTR Flags;
+    };
+} MEMORY_WORKING_SET_EX_BLOCK, *PMEMORY_WORKING_SET_EX_BLOCK;
+
+typedef struct _MEMORY_WORKING_SET_EX_INFORMATION {
+    PVOID VirtualAddress;
+    MEMORY_WORKING_SET_EX_BLOCK VirtualAttributes;
+} MEMORY_WORKING_SET_EX_INFORMATION, *PMEMORY_WORKING_SET_EX_INFORMATION;

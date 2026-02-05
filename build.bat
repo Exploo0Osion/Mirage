@@ -16,6 +16,10 @@ echo [*] Assembling src\asm\gate.asm...
 ml64 /nologo /c /Fo obj\gate.obj src\asm\gate.asm
 if errorlevel 1 exit /b 1
 
+echo [*] Assembling src\asm\spoofer_desync.asm...
+ml64 /nologo /c /Fo obj\spoofer_desync.obj src\asm\spoofer_desync.asm
+if errorlevel 1 exit /b 1
+
 echo [*] Compiling C sources...
 
 cl /nologo /MD /O1 /Ob2 /Oi /Os /GS- /Gy /GL /Gw /I include /c /Foobj\ ^
@@ -37,7 +41,15 @@ link /nologo /SUBSYSTEM:CONSOLE ^
 /MERGE:.data=.text ^
 /SECTION:.text,ERW ^
 /OUT:bin\MyLoader.exe ^
-obj\*.obj
+obj\gate.obj ^
+obj\spoofer_desync.obj ^
+obj\gadgets.obj ^
+obj\pe_utils.obj ^
+obj\globals.obj ^
+obj\engine.obj ^
+obj\loader.obj ^
+obj\main.obj ^
+kernel32.lib vcruntime.lib ucrt.lib
 
 if errorlevel 1 exit /b 1
 

